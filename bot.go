@@ -72,6 +72,28 @@ func NewPacman(pacId, x, y int, typeId string) *Pacman {
 	return &pacman
 }
 
+type BattleResult int
+
+const (
+	BATTLE_WIN BattleResult = iota + 1
+	BATTLE_DRAW
+	BATTLE_LOOSE
+)
+
+func (pacman *Pacman) Beat(pacman2 *Pacman) BattleResult {
+	if pacman.typeId == pacman2.typeId {
+		return BATTLE_DRAW
+	} else if pacman.typeId == "ROCK" && pacman2.typeId == "SCISSORS" {
+		return BATTLE_WIN
+	} else if pacman.typeId == "SCISSORS" && pacman2.typeId == "PAPER" {
+		return BATTLE_WIN
+	} else if pacman.typeId == "PAPER" && pacman2.typeId == "ROCK" {
+		return BATTLE_WIN
+	} else {
+		return BATTLE_LOOSE
+	}
+}
+
 func (pacman *Pacman) Update(x, y int, typeId string, speedTurnsLeft, abilityCooldown int) {
 	pacman.positionHistory = append(pacman.positionHistory, pacman.position)
 	pacman.position = Vector2d{x, y}
@@ -225,7 +247,7 @@ func (gameMap *GameMap) PlayRound(scanner *bufio.Scanner) {
 	gameMap.pacmanList.UpdateFromInput(scanner, gameMap)
 	gameMap.UpdatePacmansPositions(gameMap.pacmanList)
 	gameMap.UpdatePalletsFromInput(scanner)
-	logger.Println(gameMap.StringPalletMap())
+	//logger.Println(gameMap.StringPalletMap())
 	start := time.Now()
 	for _, pacman := range gameMap.pacmanList.allies {
 		gameMap.MovePacmanCleverly(pacman)
@@ -325,7 +347,7 @@ func (gameMap *GameMap) UpdatePalletsFromInput(scanner *bufio.Scanner) {
 		for x := 0; x < gameMap.width; x++ {
 			for y := 0; y < gameMap.height; y++ {
 				if gameMap.pelletMap[x][y] > 0 {
-					gameMap.pelletMap[x][y] = 1.0 * gameMap.pelletMap[x][y]
+					gameMap.pelletMap[x][y] = 0.95 * gameMap.pelletMap[x][y]
 				}
 			}
 		}
@@ -381,25 +403,39 @@ func (gameMap *GameMap) ComputePossibleDirectionsFromPosition(position *Vector2d
 	return noWallDirection
 }
 
-func (gameMap *GameMap) ComputePositionScore(position Vector2d) float64 {
-	return gameMap.pelletMap[position.x][position.y]
+func (gameMap *GameMap) ComputePositionScore(position *Vector2d, pacman *Pacman) float64 {
+	if gameMap.pelletMap[position.x][position.y] != 0 {
+		return gameMap.pelletMap[position.x][position.y] * 2
+	}
+	if gameMap.alliesIdMap[position.x][position.y] != -1 {
+		return -5
+	} else if gameMap.enemiesIdMap[position.x][position.y] != -1 {
+		if pacman.Beat(gameMap.pacmanList.enemies[gameMap.enemiesIdMap[position.x][position.y]]) == BATTLE_WIN {
+			return 1
+		} else {
+			return -1
+		}
+	}
+	return 0
 }
 
-func (gameMap *GameMap) ComputeDirectionScore(startPosition *Vector2d, direction *Vector2d, depth int, maxDepth int) float64 {
+var callCount = 0
+
+func (gameMap *GameMap) ComputeDirectionScore(pacman *Pacman, startPosition *Vector2d, direction *Vector2d, depth int, maxDepth int) float64 {
+	callCount += 1
 	if depth == maxDepth {
 		return 0
 	}
 	nextPosition := startPosition.Add(direction)
 	gameMap.MapBorderPositionCorrection(&nextPosition)
-	score := gameMap.ComputePositionScore(nextPosition) * float64(maxDepth-depth) / float64(maxDepth)
+	score := gameMap.ComputePositionScore(&nextPosition, pacman) * float64(maxDepth-depth) / float64(maxDepth)
 	bestScore := 0.0
+	directionCount := 0.0
 	for _, newDirection := range gameMap.ComputePossibleDirectionsFromPosition(&nextPosition) {
-		bestScore += gameMap.ComputeDirectionScore(&nextPosition, &newDirection, depth+1, maxDepth)
-		//if localScore > bestScore {
-		//	bestScore = localScore
-		//}
+		bestScore += gameMap.ComputeDirectionScore(pacman, &nextPosition, &newDirection, depth+1, maxDepth)
+		directionCount += 1
 	}
-	return score + bestScore
+	return score + bestScore/directionCount
 }
 
 func (gameMap *GameMap) MovePacmanCleverly(pacman *Pacman) {
@@ -407,10 +443,12 @@ func (gameMap *GameMap) MovePacmanCleverly(pacman *Pacman) {
 	bestScore := float64(math.MinInt32)
 	logger.Printf("Pacman %v\n", pacman.pacId)
 	for _, direction := range gameMap.ComputePossibleDirectionsFromPosition(&pacman.position) {
-		score := gameMap.ComputeDirectionScore(&pacman.position, &direction, 0, 11)
+		callCount = 0
+		score := gameMap.ComputeDirectionScore(pacman, &pacman.position, &direction, 0, 13)
+		//logger.Printf("%d call count %d", pacman.pacId, callCount)
 		lastPacmanDirection := pacman.Direction()
 		if direction == lastPacmanDirection.Opposite() {
-			score *= 0.1
+			score -= math.Abs(score * 0.8)
 		}
 		logger.Printf("Direction %v : %v\n", direction.Direction(), score)
 		if score > bestScore {
