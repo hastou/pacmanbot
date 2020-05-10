@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"sort"
 	"time"
@@ -28,6 +29,10 @@ func (v *Vector2d) Add(d *Vector2d) Vector2d {
 
 func (v *Vector2d) Subtract(d *Vector2d) Vector2d {
 	return Vector2d{v.x - d.x, v.y - d.y}
+}
+
+func (v *Vector2d) Opposite() Vector2d {
+	return Vector2d{-v.x, -v.y}
 }
 
 func (v *Vector2d) String() string {
@@ -89,6 +94,10 @@ func (pacman *Pacman) Direction() Vector2d {
 	}
 	return pacman.position.Subtract(&lastPosition)
 }
+
+//func (pacman *Pacman) PastDirection(index int) Vector2d {
+//
+//}
 
 func (pacman *Pacman) Move(x, y int) {
 	pacman.Command(fmt.Sprintf("MOVE %d %d %d", pacman.pacId, x, y))
@@ -200,14 +209,55 @@ const (
 
 type GameMap struct {
 	width, height int
+	roundCount    int
 	groundMap     [][]MapItem
-	pelletMap     [][]int
+	pelletMap     [][]float64
 	alliesIdMap   [][]int
 	enemiesIdMap  [][]int
+	pacmanList    *PacmanList
+}
+
+func (gameMap *GameMap) PlayRound(scanner *bufio.Scanner) {
+	var myScore, opponentScore int
+	scanner.Scan()
+	fmt.Sscan(scanner.Text(), &myScore, &opponentScore)
+	// visiblePacCount: all your pacs and enemy pacs in sight
+	gameMap.pacmanList.UpdateFromInput(scanner, gameMap)
+	gameMap.UpdatePacmansPositions(gameMap.pacmanList)
+	gameMap.UpdatePalletsFromInput(scanner)
+	logger.Println(gameMap.StringPalletMap())
+	start := time.Now()
+	for _, pacman := range gameMap.pacmanList.allies {
+		gameMap.MovePacmanCleverly(pacman)
+	}
+	logger.Println(gameMap.pacmanList)
+	fmt.Println()
+	gameMap.roundCount += 1
+	elapsed := time.Since(start)
+	log.Printf("Round took %s", elapsed)
+}
+
+func (gameMap *GameMap) StringPalletMap() string {
+	var description string
+	for y := 0; y < gameMap.height; y++ {
+		for x := 0; x < gameMap.width; x++ {
+			if math.Trunc(gameMap.pelletMap[x][y]) == 10 {
+				description += "O"
+			} else if gameMap.pelletMap[x][y] > 0.5 {
+				description += "."
+			} else {
+				description += " "
+			}
+		}
+		description += "\n"
+	}
+	return description
 }
 
 func NewGameMapFromInput(scanner *bufio.Scanner) *GameMap {
 	gameMap := GameMap{}
+	gameMap.pacmanList = NewPacmanList()
+	gameMap.roundCount = 0
 	// width: size of the grid
 	// height: top left corner is (x=0, y=0)
 	scanner.Scan()
@@ -217,9 +267,9 @@ func NewGameMapFromInput(scanner *bufio.Scanner) *GameMap {
 		gameMap.groundMap[i] = make([]MapItem, gameMap.height)
 	}
 
-	gameMap.pelletMap = make([][]int, gameMap.width)
+	gameMap.pelletMap = make([][]float64, gameMap.width)
 	for i := range gameMap.pelletMap {
-		gameMap.pelletMap[i] = make([]int, gameMap.height)
+		gameMap.pelletMap[i] = make([]float64, gameMap.height)
 	}
 
 	gameMap.alliesIdMap = make([][]int, gameMap.width)
@@ -261,9 +311,36 @@ func (gameMap *GameMap) UpdatePacmansPositions(pacmanList *PacmanList) {
 }
 
 func (gameMap *GameMap) UpdatePalletsFromInput(scanner *bufio.Scanner) {
-	for x := 0; x < gameMap.width; x++ {
-		for y := 0; y < gameMap.height; y++ {
-			gameMap.pelletMap[x][y] = 0
+	if gameMap.roundCount == 0 {
+		for x := 0; x < gameMap.width; x++ {
+			for y := 0; y < gameMap.height; y++ {
+				if gameMap.groundMap[x][y] == FloorItem && gameMap.enemiesIdMap[x][y] == -1 && gameMap.alliesIdMap[x][y] == -1 {
+					gameMap.pelletMap[x][y] = 1
+				} else {
+					gameMap.pelletMap[x][y] = 0
+				}
+			}
+		}
+	} else {
+		for x := 0; x < gameMap.width; x++ {
+			for y := 0; y < gameMap.height; y++ {
+				if gameMap.pelletMap[x][y] > 0 {
+					gameMap.pelletMap[x][y] = 1.0 * gameMap.pelletMap[x][y]
+				}
+			}
+		}
+	}
+
+	for _, pacman := range gameMap.pacmanList.allies {
+		for _, direction := range ALL_DIRECTIONS {
+			currentItem := FloorItem
+			position := pacman.position
+			for currentItem != WallItem {
+				position = direction.Add(&position)
+				gameMap.MapBorderPositionCorrection(&position)
+				currentItem = gameMap.groundMap[position.x][position.y]
+				gameMap.pelletMap[position.x][position.y] = 0
+			}
 		}
 	}
 	// visiblePelletCount: all pellets in sight
@@ -276,7 +353,7 @@ func (gameMap *GameMap) UpdatePalletsFromInput(scanner *bufio.Scanner) {
 		var x, y, value int
 		scanner.Scan()
 		fmt.Sscan(scanner.Text(), &x, &y, &value)
-		gameMap.pelletMap[x][y] = value
+		gameMap.pelletMap[x][y] = float64(value)
 	}
 }
 
@@ -287,7 +364,7 @@ func (gameMap *GameMap) MapBorderPositionCorrection(v *Vector2d) {
 		v.x = 0
 	} else if v.y == -1 {
 		v.y = gameMap.height - 1
-	} else if nextPosition.y == gameMap.height {
+	} else if v.y == gameMap.height {
 		v.y = 0
 	}
 }
@@ -296,6 +373,7 @@ func (gameMap *GameMap) ComputePossibleDirectionsFromPosition(position *Vector2d
 	noWallDirection := make([]Vector2d, 0, 4)
 	for _, direction := range ALL_DIRECTIONS {
 		nextPosition := position.Add(&direction)
+		gameMap.MapBorderPositionCorrection(&nextPosition)
 		if gameMap.groundMap[nextPosition.x][nextPosition.y] != WallItem {
 			noWallDirection = append(noWallDirection, direction)
 		}
@@ -304,7 +382,7 @@ func (gameMap *GameMap) ComputePossibleDirectionsFromPosition(position *Vector2d
 }
 
 func (gameMap *GameMap) ComputePositionScore(position Vector2d) float64 {
-	return float64(gameMap.pelletMap[position.x][position.y])
+	return gameMap.pelletMap[position.x][position.y]
 }
 
 func (gameMap *GameMap) ComputeDirectionScore(startPosition *Vector2d, direction *Vector2d, depth int, maxDepth int) float64 {
@@ -314,44 +392,47 @@ func (gameMap *GameMap) ComputeDirectionScore(startPosition *Vector2d, direction
 	nextPosition := startPosition.Add(direction)
 	gameMap.MapBorderPositionCorrection(&nextPosition)
 	score := gameMap.ComputePositionScore(nextPosition) * float64(maxDepth-depth) / float64(maxDepth)
+	bestScore := 0.0
 	for _, newDirection := range gameMap.ComputePossibleDirectionsFromPosition(&nextPosition) {
-		score += gameMap.ComputeDirectionScore(&nextPosition, &newDirection, depth+1, maxDepth)
+		bestScore += gameMap.ComputeDirectionScore(&nextPosition, &newDirection, depth+1, maxDepth)
+		//if localScore > bestScore {
+		//	bestScore = localScore
+		//}
 	}
-	return score
+	return score + bestScore
+}
+
+func (gameMap *GameMap) MovePacmanCleverly(pacman *Pacman) {
+	var bestDirection Vector2d
+	bestScore := float64(math.MinInt32)
+	logger.Printf("Pacman %v\n", pacman.pacId)
+	for _, direction := range gameMap.ComputePossibleDirectionsFromPosition(&pacman.position) {
+		score := gameMap.ComputeDirectionScore(&pacman.position, &direction, 0, 11)
+		lastPacmanDirection := pacman.Direction()
+		if direction == lastPacmanDirection.Opposite() {
+			score *= 0.1
+		}
+		logger.Printf("Direction %v : %v\n", direction.Direction(), score)
+		if score > bestScore {
+			bestScore = score
+			bestDirection = direction
+		}
+		//logger.Printf("%v : %v", direction.Direction(), gameMap.ComputeDirectionScore(&pacman.position, &direction, 0, 10))
+	}
+	nextPosition := bestDirection.Add(&pacman.position)
+	gameMap.MapBorderPositionCorrection(&nextPosition)
+	pacman.Move(nextPosition.x, nextPosition.y)
 }
 
 var logger = log.New(os.Stderr, "", 0)
 
 func main() {
 	rand.Seed(0)
-	pacmanList := NewPacmanList()
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 1000000), 1000000)
 
 	gameMap := NewGameMapFromInput(scanner)
-	tourCount := 0
 	for {
-		start := time.Now()
-		var myScore, opponentScore int
-		scanner.Scan()
-		fmt.Sscan(scanner.Text(), &myScore, &opponentScore)
-		// visiblePacCount: all your pacs and enemy pacs in sight
-		pacmanList.UpdateFromInput(scanner, gameMap)
-		gameMap.UpdatePacmansPositions(pacmanList)
-		gameMap.UpdatePalletsFromInput(scanner)
-		if tourCount == 0 {
-			pacman := pacmanList.allies[0]
-			for _, direction := range gameMap.ComputePossibleDirectionsFromPosition(&pacman.position) {
-				logger.Printf("%v : %v", direction.Direction(), gameMap.ComputeDirectionScore(&pacman.position, &direction, 0, 10))
-			}
-		}
-		for _, pacman := range pacmanList.allies {
-			pacman.Move(rand.Intn(gameMap.width), rand.Intn(gameMap.height))
-		}
-		logger.Println(pacmanList)
-		fmt.Println()
-		tourCount += 1
-		elapsed := time.Since(start)
-		log.Printf("Round took %s", elapsed)
+		gameMap.PlayRound(scanner)
 	}
 }
